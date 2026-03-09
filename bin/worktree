@@ -1,0 +1,113 @@
+#!/bin/bash
+# Creates a git worktree for a branch, copies node_modules via CoW,
+# runs repo-specific setup, and cd's into the new directory.
+#
+# Usage: . worktree <branch-name>
+# The leading dot (.) is important — it sources the script so the
+# cd at the end actually changes your shell's directory.
+
+# Save shell options and restore them before every exit point
+_worktree_old_opts=$(set +o; shopt -p)
+set -euo pipefail
+
+_worktree_restore() { eval "$_worktree_old_opts"; unset _worktree_old_opts; }
+
+# -- Parse arguments --------------------------------------------------------
+
+verbose=0
+if [ "${1:-}" = "-v" ]; then
+  verbose=1
+  shift
+fi
+
+branch="${1:-}"
+
+if [ -z "$branch" ]; then
+  echo "Usage: . worktree [-v] <branch-name>"
+  _worktree_restore
+  return 1 2>/dev/null || exit 1
+fi
+
+# -- Find the repo root and worktree parent ---------------------------------
+
+# All worktrees live as siblings next to the main repo.
+# e.g. if repo is ~/Code/laboratory, worktrees go in ~/Code/laboratory-<name>
+repo_root="$(git rev-parse --show-toplevel)"
+repo_name="$(basename "$repo_root")"
+parent_dir="$(dirname "$repo_root")"
+
+# Convert slashes in branch name to underscores for the directory name
+# e.g. feature/new-thing -> feature_new-thing
+dir_name="${branch//\//_}"
+worktree_dir="${parent_dir}/${repo_name}-${dir_name}"
+
+# -- Check if worktree already exists ---------------------------------------
+
+if [ -d "$worktree_dir" ]; then
+  echo "Worktree already exists at $worktree_dir"
+  _worktree_restore
+  cd "$worktree_dir"
+  return 0 2>/dev/null || exit 0
+fi
+
+# -- Determine branch type and create worktree ------------------------------
+
+log() {
+  if [ "$verbose" -eq 1 ]; then
+    echo "$@"
+  fi
+}
+
+# Check if branch exists locally
+if git show-ref --verify --quiet "refs/heads/$branch"; then
+  log "Checking out existing local branch: $branch"
+  git worktree add "$worktree_dir" "$branch"
+
+# Check if branch exists on a remote
+elif git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+  log "Checking out remote branch: origin/$branch"
+  git worktree add "$worktree_dir" "$branch"
+
+# Branch doesn't exist — create a new one
+else
+  log "Creating new branch: $branch"
+  git worktree add -b "$branch" "$worktree_dir"
+fi
+
+# -- Copy node_modules using copy-on-write ----------------------------------
+
+if [ -d "${repo_root}/node_modules" ]; then
+  log "Copying node_modules (copy-on-write)..."
+
+  # Try macOS CoW first, then Linux reflink, then regular copy
+  if cp -R -c "${repo_root}/node_modules" "${worktree_dir}/node_modules" 2>/dev/null; then
+    log "Copied node_modules using macOS CoW"
+  elif cp -R --reflink=auto "${repo_root}/node_modules" "${worktree_dir}/node_modules" 2>/dev/null; then
+    log "Copied node_modules using reflink"
+  else
+    cp -R "${repo_root}/node_modules" "${worktree_dir}/node_modules"
+    log "Copied node_modules (regular copy)"
+  fi
+fi
+
+# -- Copy common untracked files -------------------------------------------
+
+for file in .env.local .tool-versions mise.toml; do
+  if [ -f "${repo_root}/${file}" ]; then
+    cp "${repo_root}/${file}" "${worktree_dir}/${file}"
+    log "Copied ${file}"
+  fi
+done
+
+# -- Run repo-specific setup -----------------------------------------------
+
+if [ -f "${worktree_dir}/.worktree-setup.sh" ]; then
+  log "Running .worktree-setup.sh..."
+  (cd "$worktree_dir" && bash .worktree-setup.sh)
+fi
+
+# -- Move into the new worktree --------------------------------------------
+
+echo "Worktree ready at $worktree_dir"
+_worktree_restore
+cd "$worktree_dir"

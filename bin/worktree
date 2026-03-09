@@ -7,7 +7,10 @@
 # cd at the end actually changes your shell's directory.
 
 # Save shell options and restore them before every exit point
-_worktree_old_opts=$(set +o; shopt -p)
+_worktree_old_opts=$(set +o)
+if command -v shopt >/dev/null 2>&1; then
+  _worktree_old_opts="$_worktree_old_opts; $(shopt -p)"
+fi
 set -euo pipefail
 
 _worktree_restore() { eval "$_worktree_old_opts"; unset _worktree_old_opts; }
